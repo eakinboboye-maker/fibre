@@ -124,6 +124,9 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 def index():
     return FileResponse("static/index.html")
     
+@app.get("/api/healthz")
+def healthz():
+    return {"ok": True}
 
 
 @app.get("/api/me")
