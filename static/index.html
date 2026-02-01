@@ -1,0 +1,336 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Banana Fibre Ops</title>
+  <link rel="manifest" href="/static/manifest.webmanifest">
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">🍌 Banana Fibre Ops</div>
+    <div class="whoami" id="whoami"></div>
+    <div class="actions">
+      <div id="netBadge" class="badge badge-ok">Online</div>
+      <button id="syncBtn" class="secondary hidden">Sync (0)</button>
+      <button id="logoutBtn" class="secondary hidden">Logout</button>
+    </div>
+  </header>
+
+  <main class="container">
+    <section id="loginView" class="card">
+      <h2>Login (Admin / Supervisor)</h2>
+      <form id="loginForm" class="grid">
+        <label>Email <input name="email" type="email" required /></label>
+        <label>Password <input name="password" type="password" required /></label>
+        <button type="submit">Sign in</button>
+      </form>
+      <p class="muted">Workers do not log in. Admin/Supervisor logs daily work and approvals.</p>
+    </section>
+
+    <section id="appView" class="hidden">
+      <div class="tabs">
+        <button class="tab active" data-tab="daily">Daily Logs</button>
+        <button class="tab" data-tab="approvals">Approvals</button>
+        <button class="tab" data-tab="payroll">Payroll</button>
+        <button class="tab" data-tab="reports">Reports</button>
+        <button class="tab adminOnly hidden" data-tab="audit">Audit</button>
+        <button class="tab adminOnly hidden" data-tab="admin">Admin</button>
+      </div>
+
+      <!-- DAILY -->
+      <section id="tab-daily" class="tabPanel">
+        <div class="grid2">
+          <div class="card">
+            <div class="row row-space">
+              <h2 style="margin:0;">Worker & Day</h2>
+              <div class="row">
+                <div id="dayStatus" class="badge">No day loaded</div>
+                <button id="closeDayBtn" class="secondary hidden">Close Day</button>
+                <button id="reopenDayBtn" class="secondary adminOnly hidden">Reopen Day</button>
+              </div>
+            </div>
+
+            <div class="grid">
+              <label>Worker <select id="workerSelect"></select></label>
+              <div class="row">
+                <label>Date <input id="workDate" type="date" /></label>
+                <label>Workstation <select id="workstationSelect"></select></label>
+                <button id="loadDayBtn" class="secondary">Create / Load Day</button>
+              </div>
+              <label>Day note <textarea id="dayNote" rows="3"></textarea></label>
+              <button id="saveDayNoteBtn" class="secondary">Save Day Note</button>
+            </div>
+
+            <div id="dayMeta" class="callout hidden"></div>
+          </div>
+
+          <div class="card">
+            <div class="row row-space">
+              <h2 style="margin:0;">Add Tasks</h2>
+              <label class="row" style="align-items:center; gap:8px;">
+                <input type="checkbox" id="fastModeToggle" />
+                <span>Fast mode (Combing + Weaving)</span>
+              </label>
+            </div>
+
+            <form id="taskForm" class="grid" style="margin-top:10px;">
+              <div id="normalTaskBox" class="grid">
+                <label>Task type <select id="taskTypeSelect"></select></label>
+                <label>Quantity <input id="taskQty" type="number" step="0.001" min="0" value="0" /></label>
+                <label>Note (optional) <textarea id="taskNote" rows="2"></textarea></label>
+                <button type="submit">Add Task (Pending)</button>
+              </div>
+
+              <div id="fastTaskBox" class="grid hidden">
+                <label>Combing (kg) <input id="fastCombing" type="number" step="0.001" min="0" value="0" /></label>
+                <label>Weaving/Twisting (m) <input id="fastWeaving" type="number" step="0.001" min="0" value="0" /></label>
+                <label>Note (optional) <textarea id="fastNote" rows="2"></textarea></label>
+                <button type="button" id="fastSaveBtn">Save Fast Log</button>
+              </div>
+            </form>
+
+            <p class="muted">Offline? Entries will queue and sync when online.</p>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="row row-space">
+            <h2 style="margin:0;">Tasks</h2>
+            <button id="refreshDayBtn" class="secondary">Refresh</button>
+          </div>
+
+          <div id="rubricBox" class="callout hidden"></div>
+          <div id="tasksWrap"></div>
+        </div>
+      </section>
+
+      <!-- APPROVALS -->
+      <section id="tab-approvals" class="tabPanel hidden">
+        <div class="card">
+          <div class="row row-space">
+            <h2 style="margin:0;">Pending Approvals</h2>
+            <button id="refreshApprovalsBtn" class="secondary">Refresh</button>
+          </div>
+
+          <div class="row">
+            <label>Worker (optional) <select id="approvalsWorkerSelect"></select></label>
+            <label>Start (optional) <input id="approvalsStart" type="date" /></label>
+            <label>End (optional) <input id="approvalsEnd" type="date" /></label>
+            <button id="filterApprovalsBtn" class="secondary">Apply Filter</button>
+          </div>
+
+          <div class="row">
+            <button id="bulkApproveBtn" class="ok">Bulk Approve Selected</button>
+            <button id="bulkRejectBtn" class="danger">Bulk Reject Selected</button>
+          </div>
+
+          <div id="approvalsWrap"></div>
+        </div>
+      </section>
+
+      <!-- PAYROLL -->
+      <section id="tab-payroll" class="tabPanel hidden">
+        <div class="grid2">
+          <div class="card">
+            <h2>Payroll Summary (Live)</h2>
+            <div class="grid">
+              <label>Worker <select id="payrollWorkerSelect"></select></label>
+              <div class="row">
+                <label>As of <input id="payrollAsOf" type="date" /></label>
+                <button id="payrollRefreshBtn" class="secondary">Refresh</button>
+              </div>
+              <div id="payrollSummary" class="callout"></div>
+              <button id="downloadPayrollCsvBtn" class="secondary">Download Worker CSV</button>
+            </div>
+          </div>
+
+          <div class="card">
+            <h2>Payroll Runs (Frozen Snapshot)</h2>
+            <div class="row">
+              <label>As of <input id="runAsOf" type="date" /></label>
+              <input id="runNote" placeholder="Optional run note" />
+              <button id="createRunBtn">Create Payroll Run</button>
+            </div>
+            <div class="row">
+              <button id="refreshRunsBtn" class="secondary">Refresh Runs</button>
+            </div>
+            <div id="runsWrap"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- REPORTS -->
+      <section id="tab-reports" class="tabPanel hidden">
+        <div class="card">
+          <div class="row row-space">
+            <h2 style="margin:0;">Reports (Approved Only)</h2>
+            <button id="refreshReportsBtn" class="secondary">Refresh</button>
+          </div>
+
+          <div class="row">
+            <label>Start <input id="reportStart" type="date" /></label>
+            <label>End <input id="reportEnd" type="date" /></label>
+          </div>
+
+          <div class="row">
+            <button id="exportTaskTotalsBtn" class="secondary">Export Task Totals CSV</button>
+            <button id="exportWorkstationsBtn" class="secondary">Export Workstations CSV</button>
+            <button id="exportSupervisorsBtn" class="secondary">Export Supervisors CSV</button>
+          </div>
+
+          <h3>Totals by Task Type</h3>
+          <div id="reportTaskTotals"></div>
+
+          <h3 style="margin-top:14px;">Totals by Workstation</h3>
+          <div id="reportWorkstations"></div>
+
+          <h3 style="margin-top:14px;">Supervisor Summary</h3>
+          <div id="reportSupervisors"></div>
+        </div>
+      </section>
+
+      <!-- AUDIT -->
+      <section id="tab-audit" class="tabPanel hidden">
+        <div class="card">
+          <div class="row row-space">
+            <h2 style="margin:0;">Audit Logs</h2>
+            <button id="refreshAuditBtn" class="secondary">Refresh</button>
+          </div>
+          <div class="row">
+            <label>Entity type (optional) <input id="auditEntityType" placeholder="work_task / work_day / payroll_run" /></label>
+            <label>Limit <input id="auditLimit" type="number" min="1" max="500" value="100" /></label>
+          </div>
+          <div id="auditWrap"></div>
+        </div>
+      </section>
+
+      <!-- ADMIN -->
+      <section id="tab-admin" class="tabPanel hidden">
+        <div class="grid2">
+          <div class="card">
+            <h2>Setup: Factories / Teams / Workstations</h2>
+
+            <div class="grid">
+              <h3 style="margin:0;">Create Factory</h3>
+              <form id="createFactoryForm" class="row">
+                <input name="name" placeholder="Factory name" required />
+                <button type="submit">Create</button>
+              </form>
+
+              <h3 style="margin:0;">Create Team</h3>
+              <form id="createTeamForm" class="row">
+                <select id="teamFactorySelect" name="factory_id" required></select>
+                <input name="name" placeholder="Team name" required />
+                <button type="submit">Create</button>
+              </form>
+
+              <h3 style="margin:0;">Create Workstation</h3>
+              <form id="createWorkstationForm" class="row">
+                <select id="wsFactorySelect" name="factory_id" required></select>
+                <input name="name" placeholder="Workstation name" required />
+                <button type="submit">Create</button>
+              </form>
+
+              <div class="row">
+                <button id="refreshAdminListsBtn" class="secondary" type="button">Refresh Lists</button>
+              </div>
+
+              <div id="factoryList"></div>
+              <div id="teamList"></div>
+              <div id="workstationList"></div>
+            </div>
+          </div>
+
+          <div class="card">
+            <h2>Create Supervisor/Admin App User</h2>
+            <form id="createAppUserForm" class="grid">
+              <label>Email <input name="email" type="email" required /></label>
+              <label>Password <input name="password" type="password" required /></label>
+              <label>Role
+                <select name="role">
+                  <option value="supervisor">Supervisor</option>
+                  <option value="admin">Admin</option>
+                </select>
+              </label>
+              <label>Factory scope (optional)
+                <select id="newUserFactorySelect" name="factory_id"></select>
+              </label>
+              <button type="submit">Create App User</button>
+            </form>
+
+            <hr style="border:0;border-top:1px solid #e5e7ef;margin:14px 0;"/>
+
+            <h2>Assign Supervisor → Factory</h2>
+            <div class="grid">
+              <label>Supervisor/Admin <select id="appUserSelect"></select></label>
+              <label>Factory scope <select id="appUserFactorySelect"></select></label>
+              <div class="row">
+                <button id="saveUserScopeBtn">Save Scope</button>
+                <button id="toggleUserActiveBtn" class="secondary">Toggle Active</button>
+              </div>
+              <div id="appUserMeta" class="callout hidden"></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="grid2">
+          <div class="card">
+            <h2>Create Worker</h2>
+            <form id="createWorkerForm" class="grid">
+              <label>Worker code <input name="worker_code" /></label>
+              <label>Full name <input name="full_name" required /></label>
+              <label>Payout frequency
+                <select name="payout">
+                  <option value="weekly">Weekly</option>
+                  <option value="biweekly">Biweekly</option>
+                  <option value="monthly">Monthly</option>
+                </select>
+              </label>
+              <label>Payout anchor date <input name="payout_anchor_date" type="date" /></label>
+              <label>Factory (optional) <select id="newWorkerFactorySelect" name="factory_id"></select></label>
+              <label>Team (optional) <select id="newWorkerTeamSelect" name="team_id"></select></label>
+              <button type="submit">Create Worker</button>
+            </form>
+          </div>
+
+          <div class="card">
+            <h2>Assign Worker → Factory / Team / Payout</h2>
+            <div class="grid">
+              <label>Worker <select id="adminWorkerSelect"></select></label>
+              <label>Factory <select id="workerFactorySelect"></select></label>
+              <label>Team <select id="workerTeamSelect"></select></label>
+
+              <div class="row">
+                <label>Payout
+                  <select id="workerPayoutSelect">
+                    <option value="weekly">Weekly</option>
+                    <option value="biweekly">Biweekly</option>
+                    <option value="monthly">Monthly</option>
+                  </select>
+                </label>
+                <label>Anchor date <input id="workerAnchorDate" type="date"/></label>
+              </div>
+
+              <div class="row">
+                <button id="saveWorkerAssignBtn">Save Worker</button>
+                <button id="toggleWorkerActiveBtn" class="secondary">Toggle Active</button>
+              </div>
+
+              <div id="workerMeta" class="callout hidden"></div>
+            </div>
+          </div>
+        </div>
+
+      </section>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+  <script>
+    if ("serviceWorker" in navigator) navigator.serviceWorker.register("/static/sw.js");
+  </script>
+</body>
+</html>
+

@@ -1,0 +1,11 @@
+fastapi==0.115.0
+uvicorn==0.30.6
+sqlalchemy==2.0.32
+psycopg[binary]==3.2.1
+python-jose==3.3.0
+python-multipart==0.0.9
+pydantic==2.8.2
+python-dotenv==1.0.1
+passlib[argon2]==1.7.4
+argon2-cffi==23.1.0
+psycopg2-binary==2.9.11
