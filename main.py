@@ -18,6 +18,8 @@ from pydantic import BaseModel, Field
 
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
+from sqlalchemy import text, bindparam
+from sqlalchemy.dialects.postgresql import JSONB
 
 from dotenv import load_dotenv
 import json
@@ -254,21 +256,75 @@ def effective_rate(conn, worker_id: UUID, task_type_id: UUID) -> Decimal:
     return Decimal(str(d[0] if d else 0))
 
 
-def audit(conn, actor_id: UUID, actor_role: str, action: str, entity_type: str, entity_id: Optional[UUID], metadata: dict):
-    conn.execute(
-        text("""
-          insert into audit_logs (actor_id, actor_role, action, entity_type, entity_id, metadata)
-          values (:actor_id, :actor_role, :action, :entity_type, :entity_id, :metadata::jsonb)
-        """),
-        {
-            "actor_id": str(actor_id) if actor_id else None,
-            "actor_role": actor_role,
-            "action": action,
-            "entity_type": entity_type,
-            "entity_id": str(entity_id) if entity_id else None,
-            "metadata": json.dumps(metadata or {}),
-        },
+def audit(conn, actor_id, actor_role, action, entity_type, entity_id, metadata: Optional[Dict[str, Any]] = None):
+
+    meta = metadata or {}
+
+    stmt = text("""
+        insert into audit_logs (actor_id, actor_role, action, entity_type, entity_id, metadata)
+        values (:actor_id, :actor_role, :action, :entity_type, :entity_id, :meta)
+    """).bindparams(
+        bindparam("meta", type_=JSONB)
     )
+
+    conn.execute(stmt, {
+        "actor_id": str(actor_id),
+        "actor_role": actor_role,
+        "action": action,
+        "entity_type": entity_type,
+        "entity_id": str(entity_id) if entity_id else None,
+        "meta": meta,
+    })
+
+
+def compute_period(payout: str, anchor: date, as_of: date):
+    """
+    Returns (period_start, period_end) inclusive dates for the period containing as_of.
+    payout: weekly|biweekly|monthly
+    anchor: anchor date (defines boundaries)
+    """
+    if payout in ("weekly", "biweekly"):
+        days = 7 if payout == "weekly" else 14
+        delta = (as_of - anchor).days
+        if delta < 0:
+            # move backwards in blocks
+            blocks = (abs(delta) + days - 1) // days
+            start = anchor - timedelta(days=blocks * days)
+        else:
+            blocks = delta // days
+            start = anchor + timedelta(days=blocks * days)
+        end = start + timedelta(days=days - 1)
+        return start, end
+
+    # monthly: anchor day-of-month defines boundary
+    # we interpret "period start" as anchor day in a month, and period end day before next anchor.
+    anchor_dom = anchor.day
+
+    def add_month(d: date):
+        y = d.year + (d.month // 12)
+        m = (d.month % 12) + 1
+        # clamp day
+        import calendar
+        last = calendar.monthrange(y, m)[1]
+        return date(y, m, min(d.day, last))
+
+    # find most recent anchor date <= as_of
+    # start at same month as as_of, on anchor_dom (clamped)
+    import calendar
+    last = calendar.monthrange(as_of.year, as_of.month)[1]
+    cand = date(as_of.year, as_of.month, min(anchor_dom, last))
+    if cand > as_of:
+        # move to previous month
+        y = as_of.year if as_of.month > 1 else as_of.year - 1
+        m = as_of.month - 1 if as_of.month > 1 else 12
+        last2 = calendar.monthrange(y, m)[1]
+        cand = date(y, m, min(anchor_dom, last2))
+
+    start = cand
+    next_anchor = add_month(start)
+    end = next_anchor - timedelta(days=1)
+    return start, end
+
 
 # ---------------------------
 # Schemas
@@ -611,7 +667,7 @@ def create_work_day(body: WorkDayCreateIn, u=Depends(current_user)):
             },
         ).fetchone()
         
-        audit(conn, u["id"], u["role"], "WORKDAY_UPSERT", "work_day", UUID(row[0]), {
+        audit(conn, u["id"], u["role"], "WORKDAY_UPSERT", "work_day", UUID(str(row[0])), {
 	    "worker_id": str(body.worker_id),
 	    "work_date": str(body.work_date),
 	    "workstation_id": str(body.workstation_id) if body.workstation_id else None,
@@ -910,6 +966,7 @@ def payroll(worker_id: UUID, as_of: Optional[date] = None, u=Depends(current_use
               where wd.worker_id = :wid
                 and wd.work_date between :s and :e
                 and wt.status = 'approved'
+                and wt.paid_run_id is null
             """),
             {"wid": str(worker_id), "s": start, "e": end},
         ).fetchall()
@@ -958,6 +1015,7 @@ def payroll_csv(worker_id: UUID, as_of: Optional[date] = None, u=Depends(current
               join task_types tt on tt.id = wt.task_type_id
               where wd.worker_id = :wid
                 and wd.work_date between :s and :e
+                and wt.paid_run_id is null
               order by wd.work_date asc, wt.created_at asc
             """),
             {"wid": str(worker_id), "s": start, "e": end},
@@ -1405,6 +1463,7 @@ class PayrollRunCreateIn(BaseModel):
 def create_payroll_run(body: PayrollRunCreateIn, u=Depends(current_user)):
     run_id = uuid4()
     with engine.begin() as conn:
+        now = datetime.now(timezone.utc)
         conn.execute(text("""
           insert into payroll_runs (id, as_of, created_by, note)
           values (:id, :as_of, :by, :note)
@@ -1422,19 +1481,20 @@ def create_payroll_run(body: PayrollRunCreateIn, u=Depends(current_user)):
             start, end = period_for_worker(w[2], w[3], body.as_of)
 
             rows = conn.execute(text("""
-              select tt.code, wt.quantity, wt.approved_pay_ngn
-              from work_tasks wt
-              join work_days wd on wd.id = wt.work_day_id
-              join task_types tt on tt.id = wt.task_type_id
-              where wd.worker_id = :wid
-                and wd.work_date between :s and :e
-                and wt.status = 'approved'
-            """), {"wid": str(wid), "s": start, "e": end}).fetchall()
+	    select wt.id, tt.code, wt.quantity
+	    from work_tasks wt
+	    join work_days wd on wd.id = wt.work_day_id
+	    join task_types tt on tt.id = wt.task_type_id
+	    where wd.worker_id = :worker_id
+	      and wd.work_date between :start and :end
+	      and wt.status = 'approved'
+	      and wt.paid_run_id is null
+	"""), {"worker_id": str(worker_id), "start": period_start, "end": period_end}).fetchall()
 
             total_pay = sum(Decimal(str(r[2])) for r in rows).quantize(Decimal("0.01"))
             combed = sum(Decimal(str(r[1])) for r in rows if r[0] == "COMBING")
             woven = sum(Decimal(str(r[1])) for r in rows if r[0] == "WEAVING")
-
+            
             conn.execute(text("""
               insert into payroll_run_items
                 (run_id, worker_id, worker_name, payout, period_start, period_end,
@@ -1453,6 +1513,21 @@ def create_payroll_run(body: PayrollRunCreateIn, u=Depends(current_user)):
                 "ckg": str(combed),
                 "wm": str(woven),
             })
+            
+            task_ids = [str(r[0]) for r in rows]
+            if task_ids:
+            	conn.execute(text("""
+			update work_tasks
+			set paid_run_id = :run_id,
+			    paid_at = :paid_at
+			where id = any(:task_ids::uuid[])
+			  and status = 'approved'
+			  and paid_run_id is null
+		    """), {
+			"run_id": str(run_id),
+			"paid_at": now,
+			"task_ids": task_ids
+		    })
 
         audit(conn, u["id"], u["role"], "PAYROLL_RUN_CREATE", "payroll_run", run_id, {"as_of": str(body.as_of)})
 
@@ -1561,6 +1636,78 @@ def report_by_supervisor_csv(start: date, end: date):
         w.writerow([r["supervisor_email"], r["days_logged"], r["tasks_approved"], r["approved_pay_ngn"]])
     return Response(out.getvalue(), media_type="text/csv",
         headers={"Content-Disposition": f'attachment; filename="report_supervisors_{start}_{end}.csv"'})
+        
+
+@app.get("/api/payroll/due")
+def payroll_due(as_of: date = Query(default=None), u=Depends(get_current_user)):
+    # supervisors see only their factory scope (if any); admins see all
+    if as_of is None:
+        as_of = date.today()
+
+    with engine.begin() as conn:
+        # load workers (respect factory scope)
+        if u["role"] == "supervisor" and u.get("factory_id"):
+            wrows = conn.execute(text("""
+                select id, full_name, payout, payout_anchor_date, factory_id
+                from workers
+                where is_active = true and factory_id = :fid
+                order by full_name asc
+            """), {"fid": str(u["factory_id"])}).fetchall()
+        else:
+            wrows = conn.execute(text("""
+                select id, full_name, payout, payout_anchor_date, factory_id
+                from workers
+                where is_active = true
+                order by full_name asc
+            """)).fetchall()
+
+        due = []
+        for r in wrows:
+            worker_id, full_name, payout, anchor, factory_id = r
+            if not anchor:
+                continue
+
+            pstart, pend = compute_period(payout, anchor, as_of)
+
+            # Due means: period has ended (or is today end) AND there is approved unpaid work in it
+            if pend > as_of:
+                continue
+
+            x = conn.execute(text("""
+                select
+                  coalesce(sum(case when tt.code='COMBING' then wt.quantity else 0 end), 0) as combed_kg,
+                  coalesce(sum(case when tt.code in ('WEAVING','TWISTING') then wt.quantity else 0 end), 0) as woven_m,
+                  coalesce(sum(case when tt.code='COMBING' then wt.quantity*tt.rate_ngn_per_unit else 0 end), 0)
+                  + coalesce(sum(case when tt.code in ('WEAVING','TWISTING') then wt.quantity*tt.rate_ngn_per_unit else 0 end), 0)
+                  + coalesce(sum(case when tt.code not in ('COMBING','WEAVING','TWISTING') then wt.quantity*tt.rate_ngn_per_unit else 0 end), 0)
+                  as total_pay
+                from work_tasks wt
+                join work_days wd on wd.id = wt.work_day_id
+                join task_types tt on tt.id = wt.task_type_id
+                where wd.worker_id = :wid
+                  and wd.work_date between :start and :end
+                  and wt.status='approved'
+                  and wt.paid_run_id is null
+            """), {"wid": str(worker_id), "start": pstart, "end": pend}).fetchone()
+
+            combed_kg = float(x[0])
+            woven_m = float(x[1])
+            total_pay = float(x[2])
+
+            if total_pay > 0:
+                due.append({
+                    "worker_id": str(worker_id),
+                    "full_name": full_name,
+                    "payout": payout,
+                    "period_start": str(pstart),
+                    "period_end": str(pend),
+                    "approved_combed_kg": combed_kg,
+                    "approved_woven_m": woven_m,
+                    "approved_total_pay_ngn": total_pay,
+                })
+
+    return due
+
         
 def assert_workday_open_by_task(conn, task_id: UUID):
     row = conn.execute(text("""

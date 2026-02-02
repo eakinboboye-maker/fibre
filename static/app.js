@@ -187,6 +187,9 @@ const API = {
   reportBySupervisor: (start, end) => req(`/api/reports/by-supervisor${qs({ start, end })}`, { offlineQueue:false }),
 
   audit: (entity_type, limit) => req(`/api/audit${qs({ entity_type, limit })}`, { offlineQueue:false }),
+  
+  payrollDue: (as_of) => req(`/api/payroll/due${qs({ as_of })}`, { offlineQueue:false }),
+
 };
 
 // ---------------- UI helpers ----------------
@@ -590,6 +593,52 @@ async function createRun() {
   await refreshRuns();
 }
 
+function renderDue(rows) {
+  if (!rows.length) {
+    $("dueWrap").innerHTML = `<p class="muted">No due payments.</p>`;
+    return;
+  }
+
+  $("dueWrap").innerHTML = `
+    <div class="callout badge-warn">
+      <b>${rows.length}</b> worker(s) have due unpaid approved work.
+    </div>
+    <table>
+      <thead>
+        <tr>
+          <th>Worker</th><th>Frequency</th><th>Period</th><th>Combed</th><th>Woven</th><th>Pay</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${rows.map(r => `
+          <tr>
+            <td><b>${escapeHtml(r.full_name)}</b></td>
+            <td>${escapeHtml(r.payout)}</td>
+            <td>${escapeHtml(r.period_start)} → ${escapeHtml(r.period_end)}</td>
+            <td>${Number(r.approved_combed_kg).toFixed(3)} kg</td>
+            <td>${Number(r.approved_woven_m).toFixed(3)} m</td>
+            <td><b>${moneyNGN(r.approved_total_pay_ngn)}</b></td>
+          </tr>
+        `).join("")}
+      </tbody>
+    </table>
+    <p class="muted">Tip: Create a Payroll Run with an “As of” date on/after the period end to pay these.</p>
+  `;
+}
+
+async function refreshDue() {
+  const asOf = $("runAsOf").value || $("payrollAsOf").value || null;
+  const rows = await API.payrollDue(asOf);
+  renderDue(rows);
+
+  // Optional: a simple “notify” in-app
+  if (rows.length) {
+    // show an alert once per load, not too annoying
+    console.log("Due payments detected:", rows.length);
+  }
+}
+
+
 // ---------------- Reports ----------------
 function renderTable(rows, columns) {
   if (!rows.length) return `<p class="muted">No data.</p>`;
@@ -873,6 +922,9 @@ async function boot() {
   $("payrollRefreshBtn").onclick = () => refreshPayroll().catch(e => alert(e.message));
   $("createRunBtn").onclick = () => createRun().catch(e => alert(e.message));
   $("refreshRunsBtn").onclick = () => refreshRuns().catch(e => alert(e.message));
+  
+  if ($("refreshDueBtn")) $("refreshDueBtn").onclick = () => refreshDue().catch(e => alert(e.message));
+
 
   // Reports
   $("refreshReportsBtn").onclick = () => refreshReports().catch(e => alert(e.message));
@@ -1109,6 +1161,7 @@ async function boot() {
       setActiveTab("daily");
       await refreshApprovals();
       await refreshRuns();
+      await refreshDue();
       if (me.role === "admin") await refreshAdminData();
     } catch {
       token = ""; localStorage.removeItem("token");
