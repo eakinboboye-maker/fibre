@@ -2,7 +2,7 @@ import os
 import csv
 import io
 from datetime import date, datetime, timedelta, timezone
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 from typing import Optional, List, Literal, Dict, Any
 from uuid import UUID, uuid4
 
@@ -841,22 +841,51 @@ def pending_tasks(
 @app.post("/api/work-tasks/{task_id}/decide", dependencies=[Depends(require_admin_or_supervisor)])
 def decide_task(task_id: UUID, body: WorkTaskDecisionIn, u=Depends(current_user)):
     with engine.begin() as conn:
-    
         assert_workday_open_by_task(conn, task_id)
-        # ... your permission checks + task lookup ...
 
-        approved_pay = Decimal("0")
+        # Fetch the task + rate
+        row = conn.execute(text("""
+            select
+                wt.id,
+                wt.status,
+                wt.quantity,
+                wt.paid_run_id,
+                tt.rate_ngn_per_unit
+            from work_tasks wt
+            join task_types tt on tt.id = wt.task_type_id
+            where wt.id = :id
+        """), {"id": str(task_id)}).mappings().fetchone()
+
+        if not row:
+            raise HTTPException(status_code=404, detail="Task not found")
+
+        # If task already paid, don't allow decisions/changes
+        if row["paid_run_id"] is not None:
+            raise HTTPException(status_code=409, detail="Task already paid; cannot change decision")
+
+        # Optional: if already decided, you may want to block changes
+        # (You can remove this if you want to allow re-decisions while unpaid.)
+        if row["status"] in ("approved", "rejected") and row["status"] != body.status:
+            # allow changing decision if you prefer: just delete this block
+            pass
+
+        approved_pay = Decimal("0.00")
+
         if body.status == "approved":
-            approved_pay = (qty * rate).quantize(Decimal("0.01"))
+            qty = Decimal(str(row["quantity"] or 0))
+            rate = Decimal(str(row["rate_ngn_per_unit"] or 0))
+            approved_pay = (qty * rate).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
         conn.execute(
-            text("""update work_tasks
-                    set status = :st,
-                        decided_by = :by,
-                        decided_at = now(),
-                        decision_reason = :reason,
-                        approved_pay_ngn = :pay
-                    where id = :id"""),
+            text("""
+                update work_tasks
+                set status = :st,
+                    decided_by = :by,
+                    decided_at = now(),
+                    decision_reason = :reason,
+                    approved_pay_ngn = :pay
+                where id = :id
+            """),
             {
                 "st": body.status,
                 "by": str(u["id"]),
@@ -1477,7 +1506,7 @@ def create_payroll_run(body: PayrollRunCreateIn, u=Depends(current_user)):
         """)).fetchall()
 
         for w in workers_rows:
-            wid = UUID(w[0])
+            wid = UUID(str(w[0]))
             start, end = period_for_worker(w[2], w[3], body.as_of)
 
             rows = conn.execute(text("""
